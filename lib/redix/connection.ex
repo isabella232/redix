@@ -92,7 +92,9 @@ defmodule Redix.Connection do
         state = %{state | socket: socket}
         {:ok, shared_state} = SharedState.start_link()
 
-        case start_receiver_and_hand_socket(state.socket, shared_state) do
+        ssl? = state.opts[:scheme] === "rediss"
+
+        case start_receiver_and_hand_socket(state.socket, shared_state, ssl?) do
           {:ok, receiver} ->
             # If this is a reconnection attempt, log that we successfully
             # reconnected.
@@ -162,7 +164,10 @@ defmodule Redix.Connection do
       Exception.message(error)
     ])
 
-    :ok = :gen_tcp.close(state.socket)
+    opts = state.opts
+    interface = if opts[:scheme] === "rediss", do: :ssl, else: :gen_tcp
+
+    :ok = interface.close(state.socket)
 
     # state.receiver may be nil if we already processed the message where it
     # notifies us it stopped. If it's not nil, it means we noticed the TCP error
@@ -212,7 +217,10 @@ defmodule Redix.Connection do
 
     data = Enum.map(commands, &Protocol.pack/1)
 
-    case :gen_tcp.send(state.socket, data) do
+    opts = state.opts
+    interface = if opts[:scheme] === "rediss", do: :ssl, else: :gen_tcp
+
+    case interface.send(state.socket, data) do
       :ok ->
         {:noreply, state}
 
@@ -261,6 +269,22 @@ defmodule Redix.Connection do
     {:disconnect, {:error, %ConnectionError{reason: reason}}, state}
   end
 
+  def handle_info(
+        {:receiver, pid, {:ssl_closed, socket}},
+        %{receiver: pid, socket: socket} = state
+      ) do
+    state = %{state | receiver: nil}
+    {:disconnect, {:error, %ConnectionError{reason: :ssl_closed}}, state}
+  end
+
+  def handle_info(
+        {:receiver, pid, {:ssl_error, socket, reason}},
+        %{receiver: pid, socket: socket} = state
+      ) do
+    state = %{state | receiver: nil}
+    {:disconnect, {:error, %ConnectionError{reason: reason}}, state}
+  end
+
   def terminate(reason, %{receiver: receiver, shared_state: shared_state} = _state) do
     if reason == :normal do
       :ok = GenServer.stop(receiver, :normal)
@@ -276,7 +300,9 @@ defmodule Redix.Connection do
         state = %{state | socket: socket}
         {:ok, shared_state} = SharedState.start_link()
 
-        case start_receiver_and_hand_socket(state.socket, shared_state) do
+        ssl? = state.opts[:scheme] === "rediss"
+
+        case start_receiver_and_hand_socket(state.socket, shared_state, ssl?) do
           {:ok, receiver} ->
             state = %{state | shared_state: shared_state, receiver: receiver}
             {:ok, state}
@@ -290,15 +316,17 @@ defmodule Redix.Connection do
     end
   end
 
-  defp start_receiver_and_hand_socket(socket, shared_state) do
+  defp start_receiver_and_hand_socket(socket, shared_state, ssl?) do
     {:ok, receiver} =
       Receiver.start_link(sender: self(), socket: socket, shared_state: shared_state)
 
+    {interface, opts} = if ssl?, do: {:ssl, :ssl}, else: {:gen_tcp, :inet}
+
     # We activate the socket after transferring control to the receiver
-    # process, so that we don't get any :tcp_closed messages before
+    # process, so that we don't get any :ssl_closed messages before
     # transferring control.
-    with :ok <- :gen_tcp.controlling_process(socket, receiver),
-         :ok <- :inet.setopts(socket, active: :once),
+    with :ok <- interface.controlling_process(socket, receiver),
+         :ok <- opts.setopts(socket, active: :once),
          do: {:ok, receiver}
   end
 

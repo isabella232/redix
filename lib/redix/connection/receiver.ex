@@ -63,6 +63,22 @@ defmodule Redix.Connection.Receiver do
     disconnect(msg, state)
   end
 
+  def handle_info({:ssl, socket, data}, %{socket: socket} = state) do
+    :ok = :ssl.setopts(socket, active: :once)
+
+    state = new_data(state, data)
+
+    {:noreply, state}
+  end
+
+  def handle_info({:ssl_closed, socket} = msg, %{socket: socket} = state) do
+    disconnect(msg, state)
+  end
+
+  def handle_info({:ssl_error, socket, _reason} = msg, %{socket: socket} = state) do
+    disconnect(msg, state)
+  end
+
   ## Helpers
 
   defp new_data(state, <<>>) do
